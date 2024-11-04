@@ -1,50 +1,51 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sync"
+
+	workerpool "github.com/LAshinCHE/vk_worker_pool/internal/worker_pool"
 )
 
-func producer(strs ...string) <-chan string {
-	prod := make(chan string)
-
+func producer(jobs ...string) <-chan string {
+	jobChan := make(chan string)
 	go func() {
-		for _, str := range strs {
-			prod <- str
+		defer close(jobChan)
+		for _, job := range jobs {
+			jobChan <- job
 		}
-		close(prod)
 	}()
-
-	return prod
+	return jobChan
 }
-
-func worker(id int, wg *sync.WaitGroup, chanData <-chan string, result chan<- struct{}) {
-	defer wg.Done()
-	for d := range chanData {
-		fmt.Printf("Worker id:%d message: %s\n", id, d)
-		result <- struct{}{}
-	}
-}
-
-const (
-	workerAmount = 3
-)
 
 func main() {
-	wg := &sync.WaitGroup{}
-	resultSig := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	wg.Add(workerAmount)
+	wp := workerpool.NewWorkerPool(3, ctx)
+	wp.DeleteWorker(1)
+	wp.Run()
+	// Генерируем канал с заданиями
+	jobs := producer("Task1", "Task2", "Task3", "Task4", "Task5", "Task6", "Task7", "Task8", "Task9", "Task0")
 
-	prod := producer("some data 4", "some data 3", "some data 2", "some data 1", "some data 5")
+	var wg sync.WaitGroup
+	wg.Add(1)
 
-	for i := 1; i <= workerAmount; i++ {
-		go worker(i, wg, prod, resultSig)
-	}
+	// Собираем данные
 	go func() {
-		wg.Wait()
-		close(resultSig)
+		defer wg.Done()
+		for result := range wp.Result {
+			fmt.Println("Result:", result)
+		}
 	}()
-	for range resultSig {
+
+	// отправляем работу воркеру
+	for job := range jobs {
+		wp.AddJob(ctx, job)
 	}
+
+	wp.Close()
+	wg.Wait()
+	fmt.Println("Worker pool closed.")
 }
