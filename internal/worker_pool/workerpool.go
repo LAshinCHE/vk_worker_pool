@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type WorkerPool struct {
 	workersCount int
-	Jobs         chan string
+	Jobs         chan Job
 	Result       chan string
 	wg           *sync.WaitGroup
 	ctx          context.Context
@@ -17,11 +18,20 @@ type WorkerPool struct {
 	mtx          sync.Mutex
 }
 
+type Job struct {
+	ctx  context.Context
+	task string
+}
+
+var (
+	numJobs = atomic.Int64{}
+)
+
 func NewWorkerPool(workerNum int, ctx context.Context) *WorkerPool {
 	ctx, cancel := context.WithCancel(ctx)
 	return &WorkerPool{
 		workersCount: workerNum,
-		Jobs:         make(chan string),
+		Jobs:         make(chan Job, 0),
 		Result:       make(chan string),
 		wg:           &sync.WaitGroup{},
 		ctx:          ctx,
@@ -29,23 +39,29 @@ func NewWorkerPool(workerNum int, ctx context.Context) *WorkerPool {
 	}
 }
 
+// worker читает работу с канала и выполняет ее, если приходит фиктивная работа то завершает воркер
 func (wp *WorkerPool) worker(id int) {
 	defer wp.wg.Done()
 	for {
-		select {
-		case job, ok := <-wp.Jobs:
-			if !ok {
+		job, ok := <-wp.Jobs
+		if !ok {
+			if numJobs.Load() == 0 {
 				return
 			}
-			result := fmt.Sprintf("Worker %d jobs: %s", id, job)
-			time.Sleep(1 * time.Second)
-			wp.Result <- result
-		case <-wp.ctx.Done():
-			return
 		}
+		select {
+		case <-job.ctx.Done():
+			return
+		default:
+		}
+		result := fmt.Sprintf("Worker %d jobs: %s", id, job.task)
+		wp.Result <- result
+		time.Sleep(time.Second * 2)
+		numJobs.Add(-1)
 	}
 }
 
+// Run() Запуское всех воркеров
 func (wp *WorkerPool) Run() {
 	wp.mtx.Lock()
 	defer wp.mtx.Unlock()
@@ -53,23 +69,28 @@ func (wp *WorkerPool) Run() {
 		wp.wg.Add(1)
 		go wp.worker(i)
 	}
+	return
 }
 
-func (wp *WorkerPool) AddJob(ctx context.Context, job string) {
-	select {
-	case wp.Jobs <- job:
-	case <-ctx.Done():
-		fmt.Println("Context cancel, cant add job")
+// Добавляет работу в канал работ
+func (wp *WorkerPool) AddJob(ctx context.Context, task string) {
+	numJobs.Add(1)
+	job := Job{
+		ctx:  ctx,
+		task: task,
 	}
+
+	wp.Jobs <- job
+
 }
 
 func (wp *WorkerPool) Close() {
 	wp.cancel()
 	wp.wg.Wait()
 	close(wp.Result)
-	close(wp.Jobs)
 }
 
+// AddWorker - Запускает новых worker
 func (wp *WorkerPool) AddWorker(num int) {
 	wp.mtx.Lock()
 	defer wp.mtx.Unlock()
@@ -80,6 +101,7 @@ func (wp *WorkerPool) AddWorker(num int) {
 	wp.workersCount += num
 }
 
+// DeleteWorker - Удаляет воркера
 func (wp *WorkerPool) DeleteWorker(num int) {
 	wp.mtx.Lock()
 	defer wp.mtx.Unlock()
@@ -94,5 +116,4 @@ func (wp *WorkerPool) DeleteWorker(num int) {
 		wp.AddJob(ctxJob, "")
 	}
 	wp.workersCount -= num
-	return
 }
